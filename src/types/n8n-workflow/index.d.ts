@@ -36,6 +36,18 @@ export interface INodeProperties {
     value: string;
   }>;
   required?: boolean;
+  typeOptions?: {
+    rows?: number;
+    [key: string]: any;
+  };
+  displayOptions?: {
+    show?: {
+      [key: string]: string[];
+    };
+    hide?: {
+      [key: string]: string[];
+    };
+  };
 }
 
 export interface IDataObject { [key: string]: any }

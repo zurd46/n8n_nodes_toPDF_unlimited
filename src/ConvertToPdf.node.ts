@@ -30,6 +30,44 @@ export class ConvertToPdf implements INodeType {
     outputs: ['main'],
     properties: [
       {
+        displayName: 'Input Source',
+        name: 'inputSource',
+        type: 'options',
+        options: [
+          { name: 'From Previous Node', value: 'previousNode' },
+          { name: 'Manual Input', value: 'manual' },
+        ],
+        default: 'previousNode',
+        description: 'Choose where to get the content from',
+      },
+      {
+        displayName: 'HTML Content',
+        name: 'htmlContent',
+        type: 'string',
+        typeOptions: {
+          rows: 10,
+        },
+        default: '',
+        description: 'HTML content to convert to PDF. Supports expressions like {{ $json.output }}',
+        displayOptions: {
+          show: {
+            inputSource: ['manual'],
+          },
+        },
+      },
+      {
+        displayName: 'Input Field',
+        name: 'inputField',
+        type: 'string',
+        default: 'output',
+        description: 'Field name from input data to use as HTML content (e.g., "output", "html", "text")',
+        displayOptions: {
+          show: {
+            inputSource: ['previousNode'],
+          },
+        },
+      },
+      {
         displayName: 'File name',
         name: 'fileName',
         type: 'string',
@@ -70,14 +108,50 @@ export class ConvertToPdf implements INodeType {
     const fileNameParam = this.getNodeParameter('fileName', 0) as string;
     const pageFormat = this.getNodeParameter('pageFormat', 0) as string || 'A4';
     const outputType = this.getNodeParameter('outputType', 0) as string || 'binary';
+    const inputSource = this.getNodeParameter('inputSource', 0) as string || 'previousNode';
 
     const returnItems: INodeExecutionData[] = [];
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
 
-      // derive HTML string from many input types
-      const html = toHtml(item.json);
+      let html: string = '';
+
+      if (inputSource === 'manual') {
+        // Get HTML from manual input field (supports expressions)
+        html = this.getNodeParameter('htmlContent', i) as string || '';
+        if (!html) {
+          html = '<div></div>';
+        }
+      } else {
+        // Get HTML from previous node data
+        const inputField = this.getNodeParameter('inputField', i) as string || 'output';
+        const fieldValue = (item.json as any)[inputField];
+
+        if (fieldValue && typeof fieldValue === 'string') {
+          // Use string value directly (it should be HTML)
+          html = fieldValue;
+        } else if (fieldValue) {
+          // Convert non-string value to HTML
+          html = toHtml(fieldValue);
+        } else {
+          // Fallback: try common fields like 'output', 'html', 'text'
+          const commonFields = ['output', 'html', 'text', 'content', 'body'];
+          let found = false;
+          for (const field of commonFields) {
+            const val = (item.json as any)[field];
+            if (val && typeof val === 'string') {
+              html = val;
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            // Last resort: convert entire json to HTML table
+            html = toHtml(item.json);
+          }
+        }
+      }
 
       let pdfBuffer: Buffer | undefined;
 
@@ -188,25 +262,123 @@ function toHtml(obj: any): string {
 }
 
 async function renderHtmlToPdfUsingPuppeteer(html: string, pageFormat = 'A4'): Promise<Buffer> {
-  // Try to render HTML into a PDF using headless Chrome
-  const puppeteerModule = require('puppeteer');
-  const browser = await puppeteerModule.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  // Strategy 1: Try local Puppeteer
   try {
-    const page = await browser.newPage();
-    // Set content — include a minimal meta for responsive
-    await page.setContent(html, { waitUntil: 'networkidle0' } as any);
-    const buffer = await page.pdf({ format: pageFormat as any });
-    await page.close();
-    await browser.close();
-    return Buffer.from(buffer);
-  } catch (err) {
+    const puppeteerModule = require('puppeteer');
+    const browser = await puppeteerModule.launch({
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      headless: true
+    });
     try {
+      const page = await browser.newPage();
+      await page.setContent(html, { waitUntil: 'networkidle0' } as any);
+      const buffer = await page.pdf({ format: pageFormat as any, printBackground: true });
+      await page.close();
       await browser.close();
-    } catch (_) {
-      // ignore
+      return Buffer.from(buffer);
+    } catch (err) {
+      try { await browser.close(); } catch (_) {}
+      throw err;
     }
-    throw err;
+  } catch (puppeteerError) {
+    // Strategy 2: Try wkhtmltopdf
+    try {
+      return await renderWithWkhtmltopdf(html, pageFormat);
+    } catch (wkError) {
+      // Strategy 3: Use free cloud API
+      return await renderWithCloudApi(html, pageFormat);
+    }
   }
+}
+
+async function renderWithWkhtmltopdf(html: string, pageFormat: string): Promise<Buffer> {
+  const { execSync } = require('child_process');
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+
+  const tmpDir = os.tmpdir();
+  const htmlFile = path.join(tmpDir, `html2pdf_${Date.now()}.html`);
+  const pdfFile = path.join(tmpDir, `html2pdf_${Date.now()}.pdf`);
+
+  fs.writeFileSync(htmlFile, html);
+
+  const pageSize = pageFormat === 'Letter' ? 'Letter' : 'A4';
+  execSync(`wkhtmltopdf --page-size ${pageSize} --enable-local-file-access "${htmlFile}" "${pdfFile}"`, {
+    timeout: 30000,
+    stdio: 'pipe'
+  });
+
+  const pdfBuffer = fs.readFileSync(pdfFile);
+
+  try { fs.unlinkSync(htmlFile); } catch (_) {}
+  try { fs.unlinkSync(pdfFile); } catch (_) {}
+
+  return pdfBuffer;
+}
+
+async function renderWithCloudApi(html: string, pageFormat: string): Promise<Buffer> {
+  const https = require('https');
+
+  // Use free tier of html2pdf.app API
+  return new Promise((resolve, reject) => {
+    const boundary = '----FormBoundary' + Math.random().toString(36).substring(2);
+
+    // Build multipart form data
+    let body = '';
+    body += `--${boundary}\r\n`;
+    body += `Content-Disposition: form-data; name="html"; filename="document.html"\r\n`;
+    body += `Content-Type: text/html\r\n\r\n`;
+    body += html + '\r\n';
+    body += `--${boundary}\r\n`;
+    body += `Content-Disposition: form-data; name="pageSize"\r\n\r\n`;
+    body += (pageFormat === 'Letter' ? 'Letter' : 'A4') + '\r\n';
+    body += `--${boundary}\r\n`;
+    body += `Content-Disposition: form-data; name="marginTop"\r\n\r\n`;
+    body += '10\r\n';
+    body += `--${boundary}\r\n`;
+    body += `Content-Disposition: form-data; name="marginBottom"\r\n\r\n`;
+    body += '10\r\n';
+    body += `--${boundary}\r\n`;
+    body += `Content-Disposition: form-data; name="marginLeft"\r\n\r\n`;
+    body += '10\r\n';
+    body += `--${boundary}\r\n`;
+    body += `Content-Disposition: form-data; name="marginRight"\r\n\r\n`;
+    body += '10\r\n';
+    body += `--${boundary}--\r\n`;
+
+    const options = {
+      hostname: 'api.html2pdf.app',
+      path: '/v1/generate',
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': Buffer.byteLength(body)
+      }
+    };
+
+    const req = https.request(options, (res: any) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      res.on('end', () => {
+        const result = Buffer.concat(chunks);
+        if (res.statusCode === 200 && result.length > 0) {
+          // Check if it's actually a PDF (starts with %PDF)
+          if (result.slice(0, 4).toString() === '%PDF') {
+            resolve(result);
+          } else {
+            reject(new Error('API did not return a valid PDF'));
+          }
+        } else {
+          reject(new Error(`Cloud API failed with status ${res.statusCode}: ${result.toString()}`));
+        }
+      });
+    });
+
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
 }
 
 async function renderTextPdfFallback(htmlOrText: string): Promise<Buffer> {
