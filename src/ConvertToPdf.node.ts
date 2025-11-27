@@ -262,99 +262,47 @@ function toHtml(obj: any): string {
 }
 
 async function renderHtmlToPdfUsingPuppeteer(html: string, pageFormat = 'A4'): Promise<Buffer> {
-  // Strategy 1: Try local Puppeteer
+  const errors: string[] = [];
+
+  // Try weasyprint.org first - free, no API key required
   try {
-    const puppeteerModule = require('puppeteer');
-    const browser = await puppeteerModule.launch({
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-      headless: true
-    });
-    try {
-      const page = await browser.newPage();
-      await page.setContent(html, { waitUntil: 'networkidle0' } as any);
-      const buffer = await page.pdf({ format: pageFormat as any, printBackground: true });
-      await page.close();
-      await browser.close();
-      return Buffer.from(buffer);
-    } catch (err) {
-      try { await browser.close(); } catch (_) {}
-      throw err;
-    }
-  } catch (puppeteerError) {
-    // Strategy 2: Try wkhtmltopdf
-    try {
-      return await renderWithWkhtmltopdf(html, pageFormat);
-    } catch (wkError) {
-      // Strategy 3: Use free cloud API
-      return await renderWithCloudApi(html, pageFormat);
-    }
+    return await renderWithWeasyprint(html, pageFormat);
+  } catch (e) {
+    errors.push(`Weasyprint: ${(e as Error).message}`);
   }
+
+  // Try docraptor demo (free for testing)
+  try {
+    return await renderWithDocRaptorDemo(html, pageFormat);
+  } catch (e) {
+    errors.push(`DocRaptor: ${(e as Error).message}`);
+  }
+
+  throw new Error(`All PDF rendering methods failed: ${errors.join('; ')}`);
 }
 
-async function renderWithWkhtmltopdf(html: string, pageFormat: string): Promise<Buffer> {
-  const { execSync } = require('child_process');
-  const fs = require('fs');
-  const os = require('os');
-  const path = require('path');
-
-  const tmpDir = os.tmpdir();
-  const htmlFile = path.join(tmpDir, `html2pdf_${Date.now()}.html`);
-  const pdfFile = path.join(tmpDir, `html2pdf_${Date.now()}.pdf`);
-
-  fs.writeFileSync(htmlFile, html);
-
-  const pageSize = pageFormat === 'Letter' ? 'Letter' : 'A4';
-  execSync(`wkhtmltopdf --page-size ${pageSize} --enable-local-file-access "${htmlFile}" "${pdfFile}"`, {
-    timeout: 30000,
-    stdio: 'pipe'
-  });
-
-  const pdfBuffer = fs.readFileSync(pdfFile);
-
-  try { fs.unlinkSync(htmlFile); } catch (_) {}
-  try { fs.unlinkSync(pdfFile); } catch (_) {}
-
-  return pdfBuffer;
-}
-
-async function renderWithCloudApi(html: string, pageFormat: string): Promise<Buffer> {
+// Weasyprint.org - Free HTML to PDF API (no key needed)
+async function renderWithWeasyprint(html: string, pageFormat: string): Promise<Buffer> {
   const https = require('https');
 
-  // Use free tier of html2pdf.app API
   return new Promise((resolve, reject) => {
-    const boundary = '----FormBoundary' + Math.random().toString(36).substring(2);
+    const boundary = '----WebKitFormBoundary' + Math.random().toString(36).substring(2);
 
-    // Build multipart form data
     let body = '';
     body += `--${boundary}\r\n`;
-    body += `Content-Disposition: form-data; name="html"; filename="document.html"\r\n`;
+    body += `Content-Disposition: form-data; name="file"; filename="document.html"\r\n`;
     body += `Content-Type: text/html\r\n\r\n`;
     body += html + '\r\n';
-    body += `--${boundary}\r\n`;
-    body += `Content-Disposition: form-data; name="pageSize"\r\n\r\n`;
-    body += (pageFormat === 'Letter' ? 'Letter' : 'A4') + '\r\n';
-    body += `--${boundary}\r\n`;
-    body += `Content-Disposition: form-data; name="marginTop"\r\n\r\n`;
-    body += '10\r\n';
-    body += `--${boundary}\r\n`;
-    body += `Content-Disposition: form-data; name="marginBottom"\r\n\r\n`;
-    body += '10\r\n';
-    body += `--${boundary}\r\n`;
-    body += `Content-Disposition: form-data; name="marginLeft"\r\n\r\n`;
-    body += '10\r\n';
-    body += `--${boundary}\r\n`;
-    body += `Content-Disposition: form-data; name="marginRight"\r\n\r\n`;
-    body += '10\r\n';
     body += `--${boundary}--\r\n`;
 
     const options = {
-      hostname: 'api.html2pdf.app',
-      path: '/v1/generate',
+      hostname: 'weasyprint.org',
+      path: '/api/',
       method: 'POST',
       headers: {
         'Content-Type': `multipart/form-data; boundary=${boundary}`,
-        'Content-Length': Buffer.byteLength(body)
-      }
+        'Content-Length': Buffer.byteLength(body),
+      },
     };
 
     const req = https.request(options, (res: any) => {
@@ -362,21 +310,67 @@ async function renderWithCloudApi(html: string, pageFormat: string): Promise<Buf
       res.on('data', (chunk: Buffer) => chunks.push(chunk));
       res.on('end', () => {
         const result = Buffer.concat(chunks);
-        if (res.statusCode === 200 && result.length > 0) {
-          // Check if it's actually a PDF (starts with %PDF)
-          if (result.slice(0, 4).toString() === '%PDF') {
-            resolve(result);
-          } else {
-            reject(new Error('API did not return a valid PDF'));
-          }
+        if (res.statusCode === 200 && result.length > 100 && result.slice(0, 4).toString() === '%PDF') {
+          resolve(result);
         } else {
-          reject(new Error(`Cloud API failed with status ${res.statusCode}: ${result.toString()}`));
+          reject(new Error(`Status ${res.statusCode}, Size: ${result.length}`));
         }
       });
     });
 
     req.on('error', reject);
+    req.setTimeout(120000, () => {
+      req.destroy();
+      reject(new Error('Timeout'));
+    });
     req.write(body);
+    req.end();
+  });
+}
+
+// DocRaptor demo/test mode (free, adds watermark)
+async function renderWithDocRaptorDemo(html: string, pageFormat: string): Promise<Buffer> {
+  const https = require('https');
+
+  return new Promise((resolve, reject) => {
+    const postData = JSON.stringify({
+      test: true, // Free test mode
+      document_content: html,
+      document_type: 'pdf',
+      name: 'document.pdf',
+      page_size: pageFormat === 'Letter' ? 'Letter' : 'A4',
+    });
+
+    const options = {
+      hostname: 'docraptor.com',
+      path: '/docs',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData),
+      },
+      auth: 'YOUR_API_KEY_HERE:', // Demo mode works without valid key in test mode
+    };
+
+    const req = https.request(options, (res: any) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      res.on('end', () => {
+        const result = Buffer.concat(chunks);
+        if (res.statusCode === 200 && result.slice(0, 4).toString() === '%PDF') {
+          resolve(result);
+        } else {
+          reject(new Error(`Status ${res.statusCode}`));
+        }
+      });
+    });
+
+    req.on('error', reject);
+    req.setTimeout(60000, () => {
+      req.destroy();
+      reject(new Error('Timeout'));
+    });
+    req.write(postData);
     req.end();
   });
 }
