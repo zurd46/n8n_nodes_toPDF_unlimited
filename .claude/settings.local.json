@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run build:*)",
+      "Bash(npm install:*)",
+      "Bash(npm whoami:*)",
+      "Bash(npm publish:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
