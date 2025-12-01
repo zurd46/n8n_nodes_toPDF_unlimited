@@ -116,26 +116,27 @@ class ConvertToPdf {
     }
     async execute() {
         const items = this.getInputData();
-        const fileNameParam = this.getNodeParameter('fileName', 0);
-        const pageFormat = this.getNodeParameter('pageFormat', 0) || 'A4';
-        const outputType = this.getNodeParameter('outputType', 0) || 'binary';
-        const inputSource = this.getNodeParameter('inputSource', 0) || 'previousNode';
-        // Get field filter options
-        const excludeFieldsRaw = this.getNodeParameter('excludeFields', 0) || '';
-        const includeFieldsRaw = this.getNodeParameter('includeFields', 0) || '';
-        const pdfTitle = this.getNodeParameter('pdfTitle', 0) || '';
-        // Parse field lists
-        const excludeFields = excludeFieldsRaw.split(',').map(f => f.trim().toLowerCase()).filter(f => f);
-        const includeFields = includeFieldsRaw.split(',').map(f => f.trim().toLowerCase()).filter(f => f);
-        // Create options object for rendering
-        const renderOptions = {
-            excludeFields,
-            includeFields,
-            pdfTitle,
-        };
         const returnItems = [];
         for (let i = 0; i < items.length; i++) {
             const item = items[i];
+            // Get parameters for each item (supports "Run Once for Each Item" mode)
+            const fileNameParam = this.getNodeParameter('fileName', i);
+            const pageFormat = this.getNodeParameter('pageFormat', i) || 'A4';
+            const outputType = this.getNodeParameter('outputType', i) || 'binary';
+            const inputSource = this.getNodeParameter('inputSource', i) || 'previousNode';
+            // Get field filter options
+            const excludeFieldsRaw = this.getNodeParameter('excludeFields', i) || '';
+            const includeFieldsRaw = this.getNodeParameter('includeFields', i) || '';
+            const pdfTitle = this.getNodeParameter('pdfTitle', i) || '';
+            // Parse field lists
+            const excludeFields = excludeFieldsRaw.split(',').map(f => f.trim().toLowerCase()).filter(f => f);
+            const includeFields = includeFieldsRaw.split(',').map(f => f.trim().toLowerCase()).filter(f => f);
+            // Create options object for rendering
+            const renderOptions = {
+                excludeFields,
+                includeFields,
+                pdfTitle,
+            };
             let contentForPdf = '';
             let isJsonData = false;
             if (inputSource === 'manual') {

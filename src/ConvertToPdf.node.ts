@@ -125,32 +125,32 @@ export class ConvertToPdf implements INodeType {
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const items = this.getInputData();
-
-    const fileNameParam = this.getNodeParameter('fileName', 0) as string;
-    const pageFormat = this.getNodeParameter('pageFormat', 0) as string || 'A4';
-    const outputType = this.getNodeParameter('outputType', 0) as string || 'binary';
-    const inputSource = this.getNodeParameter('inputSource', 0) as string || 'previousNode';
-
-    // Get field filter options
-    const excludeFieldsRaw = this.getNodeParameter('excludeFields', 0) as string || '';
-    const includeFieldsRaw = this.getNodeParameter('includeFields', 0) as string || '';
-    const pdfTitle = this.getNodeParameter('pdfTitle', 0) as string || '';
-
-    // Parse field lists
-    const excludeFields = excludeFieldsRaw.split(',').map(f => f.trim().toLowerCase()).filter(f => f);
-    const includeFields = includeFieldsRaw.split(',').map(f => f.trim().toLowerCase()).filter(f => f);
-
-    // Create options object for rendering
-    const renderOptions = {
-      excludeFields,
-      includeFields,
-      pdfTitle,
-    };
-
     const returnItems: INodeExecutionData[] = [];
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
+
+      // Get parameters for each item (supports "Run Once for Each Item" mode)
+      const fileNameParam = this.getNodeParameter('fileName', i) as string;
+      const pageFormat = this.getNodeParameter('pageFormat', i) as string || 'A4';
+      const outputType = this.getNodeParameter('outputType', i) as string || 'binary';
+      const inputSource = this.getNodeParameter('inputSource', i) as string || 'previousNode';
+
+      // Get field filter options
+      const excludeFieldsRaw = this.getNodeParameter('excludeFields', i) as string || '';
+      const includeFieldsRaw = this.getNodeParameter('includeFields', i) as string || '';
+      const pdfTitle = this.getNodeParameter('pdfTitle', i) as string || '';
+
+      // Parse field lists
+      const excludeFields = excludeFieldsRaw.split(',').map(f => f.trim().toLowerCase()).filter(f => f);
+      const includeFields = includeFieldsRaw.split(',').map(f => f.trim().toLowerCase()).filter(f => f);
+
+      // Create options object for rendering
+      const renderOptions = {
+        excludeFields,
+        includeFields,
+        pdfTitle,
+      };
 
       let contentForPdf: string = '';
       let isJsonData = false;
