@@ -110,6 +110,44 @@ class ConvertToPdf {
                     default: '',
                     description: 'Custom title for the PDF document. Leave empty for auto-generated title.',
                 },
+                {
+                    displayName: 'Use HTML Template',
+                    name: 'useTemplate',
+                    type: 'boolean',
+                    default: false,
+                    description: 'Enable to use a custom HTML template for PDF generation',
+                },
+                {
+                    displayName: 'HTML Template',
+                    name: 'htmlTemplate',
+                    type: 'string',
+                    typeOptions: {
+                        rows: 15,
+                    },
+                    default: `<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    h1 { color: #333; }
+    table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background-color: #f5f5f5; }
+  </style>
+</head>
+<body>
+  <h1>{{title}}</h1>
+  <p>Erstellt: {{date}}</p>
+  {{content}}
+</body>
+</html>`,
+                    description: 'Custom HTML template. Use placeholders: {{title}}, {{date}}, {{content}}, {{json}}, {{data.fieldName}}',
+                    displayOptions: {
+                        show: {
+                            useTemplate: [true],
+                        },
+                    },
+                },
             ],
         };
         this.methods = {};
@@ -128,6 +166,9 @@ class ConvertToPdf {
             const excludeFieldsRaw = this.getNodeParameter('excludeFields', i) || '';
             const includeFieldsRaw = this.getNodeParameter('includeFields', i) || '';
             const pdfTitle = this.getNodeParameter('pdfTitle', i) || '';
+            // Get template options
+            const useTemplate = this.getNodeParameter('useTemplate', i) || false;
+            const htmlTemplate = useTemplate ? (this.getNodeParameter('htmlTemplate', i) || '') : '';
             // Parse field lists
             const excludeFields = excludeFieldsRaw.split(',').map(f => f.trim().toLowerCase()).filter(f => f);
             const includeFields = includeFieldsRaw.split(',').map(f => f.trim().toLowerCase()).filter(f => f);
@@ -139,6 +180,7 @@ class ConvertToPdf {
             };
             let contentForPdf = '';
             let isJsonData = false;
+            let rawData = null; // Store raw data for template processing
             if (inputSource === 'manual') {
                 // Get content from manual input field (supports expressions)
                 contentForPdf = this.getNodeParameter('htmlContent', i) || '';
@@ -148,6 +190,17 @@ class ConvertToPdf {
                 // Check if manual input is JSON
                 const trimmed = contentForPdf.trim();
                 isJsonData = trimmed.startsWith('{') || trimmed.startsWith('[');
+                if (isJsonData) {
+                    try {
+                        rawData = JSON.parse(trimmed);
+                    }
+                    catch {
+                        rawData = item.json;
+                    }
+                }
+                else {
+                    rawData = item.json;
+                }
             }
             else {
                 // Get content from previous node data
@@ -158,11 +211,23 @@ class ConvertToPdf {
                     // Check if string is JSON
                     const trimmed = fieldValue.trim();
                     isJsonData = trimmed.startsWith('{') || trimmed.startsWith('[');
+                    if (isJsonData) {
+                        try {
+                            rawData = JSON.parse(trimmed);
+                        }
+                        catch {
+                            rawData = item.json;
+                        }
+                    }
+                    else {
+                        rawData = item.json;
+                    }
                 }
                 else if (fieldValue && typeof fieldValue === 'object') {
                     // Object/Array - render directly as JSON for pdf-lib
                     contentForPdf = JSON.stringify(fieldValue);
                     isJsonData = true;
+                    rawData = fieldValue;
                 }
                 else {
                     // Fallback: try common fields
@@ -175,10 +240,22 @@ class ConvertToPdf {
                                 contentForPdf = val;
                                 const trimmed = val.trim();
                                 isJsonData = trimmed.startsWith('{') || trimmed.startsWith('[');
+                                if (isJsonData) {
+                                    try {
+                                        rawData = JSON.parse(trimmed);
+                                    }
+                                    catch {
+                                        rawData = item.json;
+                                    }
+                                }
+                                else {
+                                    rawData = item.json;
+                                }
                             }
                             else if (typeof val === 'object') {
                                 contentForPdf = JSON.stringify(val);
                                 isJsonData = true;
+                                rawData = val;
                             }
                             found = true;
                             break;
@@ -188,13 +265,26 @@ class ConvertToPdf {
                         // Last resort: use entire item.json
                         contentForPdf = JSON.stringify(item.json);
                         isJsonData = true;
+                        rawData = item.json;
                     }
                 }
             }
             let pdfBuffer;
+            // If template is enabled, process the template with data
+            if (useTemplate && htmlTemplate) {
+                const processedHtml = processTemplate(htmlTemplate, rawData, pdfTitle);
+                // Use HTML rendering for template output
+                try {
+                    pdfBuffer = await renderHtmlToPdfUsingPuppeteer(processedHtml, pageFormat);
+                }
+                catch (err) {
+                    // Fallback to pdf-lib
+                    pdfBuffer = await renderTextPdfFallback(processedHtml, renderOptions);
+                }
+            }
             // For JSON data, use pdf-lib directly (renders tables properly)
             // For HTML, try external APIs first, then fallback to pdf-lib
-            if (isJsonData) {
+            else if (isJsonData) {
                 // Direct PDF generation with pdf-lib for structured data
                 pdfBuffer = await renderTextPdfFallback(contentForPdf, renderOptions);
             }
@@ -1067,6 +1157,90 @@ function formatValueForPdf(val) {
     if (typeof val === 'object')
         return sanitizeForPdf(JSON.stringify(val));
     return String(val);
+}
+// Process HTML template with data placeholders
+function processTemplate(template, data, title) {
+    if (!template)
+        return '';
+    let result = template;
+    // Current date/time
+    const now = new Date();
+    const dateStr = now.toLocaleString('de-CH', {
+        day: '2-digit', month: '2-digit', year: 'numeric',
+        hour: '2-digit', minute: '2-digit'
+    });
+    // Replace simple placeholders
+    result = result.replace(/\{\{title\}\}/gi, escapeHtml(title || 'Dokument'));
+    result = result.replace(/\{\{date\}\}/gi, dateStr);
+    result = result.replace(/\{\{datetime\}\}/gi, dateStr);
+    // Replace {{json}} with formatted JSON
+    result = result.replace(/\{\{json\}\}/gi, `<pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre>`);
+    // Replace {{content}} with auto-generated HTML from data
+    result = result.replace(/\{\{content\}\}/gi, toHtml(data));
+    // Replace {{table}} with table rendering (for arrays)
+    if (Array.isArray(data)) {
+        result = result.replace(/\{\{table\}\}/gi, renderArrayAsHtml(data));
+    }
+    else if (data && typeof data === 'object') {
+        // Find first array in data for table
+        const arrayKey = Object.keys(data).find(k => Array.isArray(data[k]));
+        if (arrayKey) {
+            result = result.replace(/\{\{table\}\}/gi, renderArrayAsHtml(data[arrayKey]));
+        }
+        else {
+            result = result.replace(/\{\{table\}\}/gi, renderObjectAsHtml(data));
+        }
+    }
+    else {
+        result = result.replace(/\{\{table\}\}/gi, '');
+    }
+    // Replace {{data.fieldName}} with specific field values
+    result = result.replace(/\{\{data\.([a-zA-Z0-9_\.]+)\}\}/gi, (match, fieldPath) => {
+        const value = getNestedValue(data, fieldPath);
+        if (value === undefined || value === null)
+            return '';
+        if (typeof value === 'object') {
+            if (Array.isArray(value)) {
+                return renderArrayAsHtml(value);
+            }
+            return renderObjectAsHtml(value);
+        }
+        return escapeHtml(String(value));
+    });
+    // Replace {{fieldName}} directly (without data. prefix)
+    result = result.replace(/\{\{([a-zA-Z0-9_]+)\}\}/gi, (match, fieldName) => {
+        // Skip already processed placeholders
+        if (['title', 'date', 'datetime', 'json', 'content', 'table'].includes(fieldName.toLowerCase())) {
+            return match;
+        }
+        if (data && typeof data === 'object' && !Array.isArray(data)) {
+            const value = data[fieldName];
+            if (value === undefined || value === null)
+                return '';
+            if (typeof value === 'object') {
+                if (Array.isArray(value)) {
+                    return renderArrayAsHtml(value);
+                }
+                return renderObjectAsHtml(value);
+            }
+            return escapeHtml(String(value));
+        }
+        return '';
+    });
+    return result;
+}
+// Get nested value from object using dot notation (e.g., "author.name")
+function getNestedValue(obj, path) {
+    if (!obj || !path)
+        return undefined;
+    const parts = path.split('.');
+    let current = obj;
+    for (const part of parts) {
+        if (current === null || current === undefined)
+            return undefined;
+        current = current[part];
+    }
+    return current;
 }
 function wrapText(text, fontSize, font, maxWidth) {
     const words = text.split(/\s+/);

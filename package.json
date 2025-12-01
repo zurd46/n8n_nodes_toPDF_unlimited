@@ -1,6 +1,6 @@
 {
   "name": "@zurdai/n8n-nodes-unlimitedpdf",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "description": "n8n custom node: convert any input (HTML, text, table, JSON, lists) into a PDF. Free and unlimited!",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
