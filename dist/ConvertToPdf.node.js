@@ -294,12 +294,23 @@ class ConvertToPdf {
                 const isHtml = trimmed.startsWith('<') || trimmed.includes('<html') || trimmed.includes('<body') || trimmed.includes('<div') || trimmed.includes('<table');
                 if (isHtml) {
                     // Try external HTML-to-PDF APIs
+                    let htmlError = null;
                     try {
                         pdfBuffer = await renderHtmlToPdfUsingPuppeteer(contentForPdf, pageFormat);
                     }
                     catch (err) {
-                        // Fallback to pdf-lib
-                        pdfBuffer = await renderTextPdfFallback(contentForPdf, renderOptions);
+                        htmlError = err;
+                        // Don't fallback to text rendering for HTML - try to preserve formatting
+                        // Wrap in full HTML document and try again with simpler structure
+                        const simpleHtml = wrapHtmlDocument(contentForPdf, pageFormat);
+                        try {
+                            pdfBuffer = await renderHtmlToPdfUsingPuppeteer(simpleHtml, pageFormat);
+                        }
+                        catch (err2) {
+                            // Last resort: use pdf-lib but preserve HTML structure as much as possible
+                            console.error('HTML rendering failed:', htmlError?.message, err2.message);
+                            pdfBuffer = await renderTextPdfFallback(contentForPdf, renderOptions);
+                        }
                     }
                 }
                 else {
@@ -504,9 +515,22 @@ function formatValue(val) {
 }
 async function renderHtmlToPdfUsingPuppeteer(html, pageFormat = 'A4') {
     const errors = [];
+    // Normalize HTML string - handle escaped characters
+    let normalizedHtml = html;
+    // Replace literal \n with actual newlines if present
+    if (html.includes('\\n')) {
+        normalizedHtml = html.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"');
+    }
     // Wrap HTML in a complete document with proper styling if not already complete
-    const wrappedHtml = wrapHtmlDocument(html, pageFormat);
-    // Try weasyprint.org first - free, no API key required, no watermark
+    const wrappedHtml = wrapHtmlDocument(normalizedHtml, pageFormat);
+    // Try local Puppeteer first - most reliable
+    try {
+        return await renderWithLocalPuppeteer(wrappedHtml, pageFormat);
+    }
+    catch (e) {
+        errors.push(`Puppeteer: ${e.message}`);
+    }
+    // Try weasyprint.org - free, no API key required, no watermark
     try {
         return await renderWithWeasyprint(wrappedHtml, pageFormat);
     }
@@ -521,6 +545,34 @@ async function renderHtmlToPdfUsingPuppeteer(html, pageFormat = 'A4') {
         errors.push(`Html2Pdf: ${e.message}`);
     }
     throw new Error(`All PDF rendering methods failed: ${errors.join('; ')}`);
+}
+// Local Puppeteer rendering - most reliable method
+async function renderWithLocalPuppeteer(html, pageFormat) {
+    const puppeteer = require('puppeteer');
+    const browser = await puppeteer.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    });
+    try {
+        const page = await browser.newPage();
+        // Set content with wait for network idle
+        await page.setContent(html, { waitUntil: 'networkidle0', timeout: 30000 });
+        // Generate PDF
+        const pdfBuffer = await page.pdf({
+            format: pageFormat === 'Letter' ? 'Letter' : 'A4',
+            printBackground: true,
+            margin: {
+                top: '20mm',
+                right: '20mm',
+                bottom: '20mm',
+                left: '20mm',
+            },
+        });
+        return Buffer.from(pdfBuffer);
+    }
+    finally {
+        await browser.close();
+    }
 }
 // Wrap HTML content in a complete document with proper styling
 function wrapHtmlDocument(html, pageFormat) {
