@@ -523,14 +523,7 @@ async function renderHtmlToPdfUsingPuppeteer(html, pageFormat = 'A4') {
     }
     // Wrap HTML in a complete document with proper styling if not already complete
     const wrappedHtml = wrapHtmlDocument(normalizedHtml, pageFormat);
-    // Try local Puppeteer first - most reliable
-    try {
-        return await renderWithLocalPuppeteer(wrappedHtml, pageFormat);
-    }
-    catch (e) {
-        errors.push(`Puppeteer: ${e.message}`);
-    }
-    // Try weasyprint.org - free, no API key required, no watermark
+    // Try weasyprint.org first - free, no API key required, no watermark
     try {
         return await renderWithWeasyprint(wrappedHtml, pageFormat);
     }
@@ -544,35 +537,54 @@ async function renderHtmlToPdfUsingPuppeteer(html, pageFormat = 'A4') {
     catch (e) {
         errors.push(`Html2Pdf: ${e.message}`);
     }
+    // Try PDFShift API (has watermark but works reliably)
+    try {
+        return await renderWithPdfShift(wrappedHtml, pageFormat);
+    }
+    catch (e) {
+        errors.push(`PDFShift: ${e.message}`);
+    }
     throw new Error(`All PDF rendering methods failed: ${errors.join('; ')}`);
 }
-// Local Puppeteer rendering - most reliable method
-async function renderWithLocalPuppeteer(html, pageFormat) {
-    const puppeteer = require('puppeteer');
-    const browser = await puppeteer.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-    });
-    try {
-        const page = await browser.newPage();
-        // Set content with wait for network idle
-        await page.setContent(html, { waitUntil: 'networkidle0', timeout: 30000 });
-        // Generate PDF
-        const pdfBuffer = await page.pdf({
-            format: pageFormat === 'Letter' ? 'Letter' : 'A4',
-            printBackground: true,
-            margin: {
-                top: '20mm',
-                right: '20mm',
-                bottom: '20mm',
-                left: '20mm',
-            },
+// PDFShift API - reliable but has watermark on free tier
+async function renderWithPdfShift(html, pageFormat) {
+    const https = require('https');
+    return new Promise((resolve, reject) => {
+        const postData = JSON.stringify({
+            source: html,
+            landscape: false,
+            use_print: false,
         });
-        return Buffer.from(pdfBuffer);
-    }
-    finally {
-        await browser.close();
-    }
+        const options = {
+            hostname: 'api.pdfshift.io',
+            path: '/v3/convert/pdf',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(postData),
+            },
+        };
+        const req = https.request(options, (res) => {
+            const chunks = [];
+            res.on('data', (chunk) => chunks.push(chunk));
+            res.on('end', () => {
+                const result = Buffer.concat(chunks);
+                if (res.statusCode === 200 && result.length > 100 && result.slice(0, 4).toString() === '%PDF') {
+                    resolve(result);
+                }
+                else {
+                    reject(new Error(`Status ${res.statusCode}, Size: ${result.length}`));
+                }
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(60000, () => {
+            req.destroy();
+            reject(new Error('Timeout'));
+        });
+        req.write(postData);
+        req.end();
+    });
 }
 // Wrap HTML content in a complete document with proper styling
 function wrapHtmlDocument(html, pageFormat) {
