@@ -652,13 +652,13 @@ async function renderTextPdfFallback(htmlOrText) {
         return await renderStructuredPdf(pdfDoc, data, font, fontBold);
     }
     // Fallback: render as plain text
-    const text = stripHtmlTags(htmlOrText);
+    const text = sanitizeForPdf(stripHtmlTags(htmlOrText));
     const page = pdfDoc.addPage();
     const fontSize = 11;
     const { width, height } = page.getSize();
     const margin = 50;
     const maxWidth = width - margin * 2;
-    const lines = wrapText(String(text), fontSize, font, maxWidth);
+    const lines = wrapText(text, fontSize, font, maxWidth);
     let y = height - margin;
     for (const line of lines) {
         if (y < margin + fontSize) {
@@ -837,12 +837,37 @@ async function renderStructuredPdf(pdfDoc, data, font, fontBold) {
     const bytes = await pdfDoc.save();
     return Buffer.from(bytes);
 }
+// Remove emojis and non-WinAnsi characters that pdf-lib cannot encode
+function sanitizeForPdf(text) {
+    if (!text)
+        return '';
+    // Remove emojis and other characters outside the basic Latin range
+    // WinAnsi can only encode characters in the Windows-1252 codepage
+    return String(text)
+        // Remove emojis (Unicode ranges for emojis)
+        .replace(/[\u{1F300}-\u{1F9FF}]/gu, '') // Misc Symbols, Emoticons, etc.
+        .replace(/[\u{2600}-\u{26FF}]/gu, '') // Misc symbols
+        .replace(/[\u{2700}-\u{27BF}]/gu, '') // Dingbats
+        .replace(/[\u{FE00}-\u{FE0F}]/gu, '') // Variation Selectors
+        .replace(/[\u{1F000}-\u{1FFFF}]/gu, '') // Extended emojis
+        // Replace common special characters with ASCII equivalents
+        .replace(/[\u2018\u2019]/g, "'") // Smart quotes
+        .replace(/[\u201C\u201D]/g, '"') // Smart double quotes
+        .replace(/\u2026/g, '...') // Ellipsis
+        .replace(/\u2013/g, '-') // En dash
+        .replace(/\u2014/g, '--') // Em dash
+        .replace(/\u00A0/g, ' ') // Non-breaking space
+        // Remove any remaining non-printable or non-WinAnsi characters
+        .replace(/[^\x00-\xFF]/g, '')
+        .trim();
+}
 // Format label for PDF (camelCase to readable)
 function formatLabelForPdf(key) {
-    return key
+    const label = key
         .replace(/([a-z])([A-Z])/g, '$1 $2')
         .replace(/_/g, ' ')
         .replace(/^./, str => str.toUpperCase());
+    return sanitizeForPdf(label);
 }
 // Format value for PDF display
 function formatValueForPdf(val) {
@@ -853,11 +878,11 @@ function formatValueForPdf(val) {
     if (typeof val === 'number')
         return String(val);
     if (typeof val === 'string')
-        return val;
+        return sanitizeForPdf(val);
     if (Array.isArray(val))
-        return val.map(v => formatValueForPdf(v)).join(', ');
+        return sanitizeForPdf(val.map(v => formatValueForPdf(v)).join(', '));
     if (typeof val === 'object')
-        return JSON.stringify(val);
+        return sanitizeForPdf(JSON.stringify(val));
     return String(val);
 }
 function wrapText(text, fontSize, font, maxWidth) {
