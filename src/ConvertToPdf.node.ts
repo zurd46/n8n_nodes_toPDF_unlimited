@@ -97,6 +97,27 @@ export class ConvertToPdf implements INodeType {
         default: 'binary',
         description: 'Choose how to output the PDF: as binary file, temporary URL, or both',
       },
+      {
+        displayName: 'Exclude Fields',
+        name: 'excludeFields',
+        type: 'string',
+        default: '',
+        description: 'Comma-separated list of fields to exclude from PDF (e.g., "sha,shortSha,author,stats,files,parents,committer,manualWorkTime,url")',
+      },
+      {
+        displayName: 'Include Only Fields',
+        name: 'includeFields',
+        type: 'string',
+        default: '',
+        description: 'Comma-separated list of fields to include in PDF. If set, only these fields will be shown (e.g., "message,date"). Leave empty to include all.',
+      },
+      {
+        displayName: 'PDF Title',
+        name: 'pdfTitle',
+        type: 'string',
+        default: '',
+        description: 'Custom title for the PDF document. Leave empty for auto-generated title.',
+      },
     ],
   };
 
@@ -109,6 +130,22 @@ export class ConvertToPdf implements INodeType {
     const pageFormat = this.getNodeParameter('pageFormat', 0) as string || 'A4';
     const outputType = this.getNodeParameter('outputType', 0) as string || 'binary';
     const inputSource = this.getNodeParameter('inputSource', 0) as string || 'previousNode';
+
+    // Get field filter options
+    const excludeFieldsRaw = this.getNodeParameter('excludeFields', 0) as string || '';
+    const includeFieldsRaw = this.getNodeParameter('includeFields', 0) as string || '';
+    const pdfTitle = this.getNodeParameter('pdfTitle', 0) as string || '';
+
+    // Parse field lists
+    const excludeFields = excludeFieldsRaw.split(',').map(f => f.trim().toLowerCase()).filter(f => f);
+    const includeFields = includeFieldsRaw.split(',').map(f => f.trim().toLowerCase()).filter(f => f);
+
+    // Create options object for rendering
+    const renderOptions = {
+      excludeFields,
+      includeFields,
+      pdfTitle,
+    };
 
     const returnItems: INodeExecutionData[] = [];
 
@@ -174,7 +211,7 @@ export class ConvertToPdf implements INodeType {
       // For HTML, try external APIs first, then fallback to pdf-lib
       if (isJsonData) {
         // Direct PDF generation with pdf-lib for structured data
-        pdfBuffer = await renderTextPdfFallback(contentForPdf);
+        pdfBuffer = await renderTextPdfFallback(contentForPdf, renderOptions);
       } else {
         // Check if it looks like HTML
         const trimmed = contentForPdf.trim().toLowerCase();
@@ -186,11 +223,11 @@ export class ConvertToPdf implements INodeType {
             pdfBuffer = await renderHtmlToPdfUsingPuppeteer(contentForPdf, pageFormat);
           } catch (err) {
             // Fallback to pdf-lib
-            pdfBuffer = await renderTextPdfFallback(contentForPdf);
+            pdfBuffer = await renderTextPdfFallback(contentForPdf, renderOptions);
           }
         } else {
           // Plain text - use pdf-lib
-          pdfBuffer = await renderTextPdfFallback(contentForPdf);
+          pdfBuffer = await renderTextPdfFallback(contentForPdf, renderOptions);
         }
       }
 
@@ -682,7 +719,14 @@ async function renderWithHtml2PdfApp(html: string, pageFormat: string): Promise<
   });
 }
 
-async function renderTextPdfFallback(htmlOrText: string): Promise<Buffer> {
+// Options interface for PDF rendering
+interface RenderOptions {
+  excludeFields: string[];
+  includeFields: string[];
+  pdfTitle: string;
+}
+
+async function renderTextPdfFallback(htmlOrText: string, options: RenderOptions = { excludeFields: [], includeFields: [], pdfTitle: '' }): Promise<Buffer> {
   // Create PDF using pdf-lib with proper table rendering
   const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
   const pdfDoc = await PDFDocument.create();
@@ -704,7 +748,9 @@ async function renderTextPdfFallback(htmlOrText: string): Promise<Buffer> {
 
   // If we have structured data, render it nicely
   if (data && typeof data === 'object') {
-    return await renderStructuredPdf(pdfDoc, data, font, fontBold);
+    // Filter data based on options
+    data = filterDataFields(data, options);
+    return await renderStructuredPdf(pdfDoc, data, font, fontBold, options);
   }
 
   // Fallback: render as plain text
@@ -731,8 +777,51 @@ async function renderTextPdfFallback(htmlOrText: string): Promise<Buffer> {
   return Buffer.from(bytes);
 }
 
+// Filter data fields based on include/exclude options
+function filterDataFields(data: any, options: RenderOptions): any {
+  const { excludeFields, includeFields } = options;
+
+  // Helper to check if a field should be included
+  const shouldIncludeField = (fieldName: string): boolean => {
+    const lowerField = fieldName.toLowerCase();
+
+    // If includeFields is set, only include those fields
+    if (includeFields.length > 0) {
+      return includeFields.includes(lowerField);
+    }
+
+    // Otherwise, exclude fields in excludeFields
+    if (excludeFields.length > 0) {
+      return !excludeFields.includes(lowerField);
+    }
+
+    return true;
+  };
+
+  // Recursively filter object
+  const filterObject = (obj: any): any => {
+    if (Array.isArray(obj)) {
+      return obj.map(item => filterObject(item));
+    }
+
+    if (obj && typeof obj === 'object') {
+      const filtered: any = {};
+      for (const key of Object.keys(obj)) {
+        if (shouldIncludeField(key)) {
+          filtered[key] = filterObject(obj[key]);
+        }
+      }
+      return filtered;
+    }
+
+    return obj;
+  };
+
+  return filterObject(data);
+}
+
 // Render structured JSON data as a nicely formatted PDF
-async function renderStructuredPdf(pdfDoc: any, data: any, font: any, fontBold: any): Promise<Buffer> {
+async function renderStructuredPdf(pdfDoc: any, data: any, font: any, fontBold: any, options: RenderOptions = { excludeFields: [], includeFields: [], pdfTitle: '' }): Promise<Buffer> {
   const { rgb } = require('pdf-lib');
 
   let page = pdfDoc.addPage();
@@ -741,10 +830,13 @@ async function renderStructuredPdf(pdfDoc: any, data: any, font: any, fontBold: 
   const contentWidth = width - margin * 2;
 
   let y = height - margin;
-  const lineHeight = 16;
+  const lineHeight = 14;
+  const titleSize = 18;
   const headerSize = 14;
-  const textSize = 10;
-  const cellPadding = 5;
+  const subHeaderSize = 11;
+  const textSize = 9;
+  const smallSize = 8;
+  const cellPadding = 4;
 
   // Helper: Check if we need a new page
   const checkNewPage = (neededSpace: number) => {
@@ -754,177 +846,294 @@ async function renderStructuredPdf(pdfDoc: any, data: any, font: any, fontBold: 
     }
   };
 
-  // Helper: Draw text
-  const drawText = (text: string, x: number, yPos: number, size: number, bold = false) => {
+  // Helper: Draw text with color
+  const drawText = (text: string, x: number, yPos: number, size: number, bold = false, color = rgb(0, 0, 0)) => {
     const f = bold ? fontBold : font;
-    page.drawText(String(text || ''), { x, y: yPos, size, font: f, color: rgb(0, 0, 0) });
+    const safeText = sanitizeForPdf(String(text || ''));
+    page.drawText(safeText, { x, y: yPos, size, font: f, color });
   };
 
   // Helper: Draw a line
-  const drawLine = (x1: number, y1: number, x2: number, y2: number, thickness = 0.5) => {
-    page.drawLine({
-      start: { x: x1, y: y1 },
-      end: { x: x2, y: y2 },
-      thickness,
-      color: rgb(0.7, 0.7, 0.7),
-    });
+  const drawLine = (x1: number, y1: number, x2: number, y2: number, thickness = 0.5, color = rgb(0.8, 0.8, 0.8)) => {
+    page.drawLine({ start: { x: x1, y: y1 }, end: { x: x2, y: y2 }, thickness, color });
   };
 
   // Helper: Draw rectangle
   const drawRect = (x: number, yPos: number, w: number, h: number, fillColor: any) => {
-    page.drawRectangle({
-      x,
-      y: yPos,
-      width: w,
-      height: h,
-      color: fillColor,
-    });
+    page.drawRectangle({ x, y: yPos, width: w, height: h, color: fillColor });
   };
 
-  // Separate scalar values and arrays
-  const scalarKeys: string[] = [];
-  const arrayKeys: string[] = [];
+  // Format date/time for display
+  const formatDateTime = (dateStr: string) => {
+    try {
+      const d = new Date(dateStr);
+      return d.toLocaleString('de-CH', {
+        day: '2-digit', month: '2-digit', year: 'numeric',
+        hour: '2-digit', minute: '2-digit'
+      });
+    } catch { return dateStr; }
+  };
 
-  if (Array.isArray(data)) {
-    // If root is array, render it directly as table
-    arrayKeys.push('_root');
-  } else {
-    for (const key of Object.keys(data)) {
-      if (Array.isArray(data[key])) {
-        arrayKeys.push(key);
-      } else {
-        scalarKeys.push(key);
+  // Current date/time header
+  const now = new Date();
+  const dateTimeStr = now.toLocaleString('de-CH', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit'
+  });
+  drawText(`Erstellt: ${dateTimeStr}`, margin, y, smallSize, false, rgb(0.5, 0.5, 0.5));
+  y -= 25;
+
+  // Check if this is a Git commits report (array with repository/commits structure)
+  const isGitReport = Array.isArray(data) && data.length > 0 && data[0].repository && data[0].commits;
+
+  if (isGitReport) {
+    // Special rendering for Git commit reports
+    const title = options.pdfTitle || 'Git Commit Report';
+    drawText(title, margin, y, titleSize, true);
+    y -= titleSize + 15;
+
+    for (const repo of data) {
+      checkNewPage(100);
+
+      // Repository header
+      drawRect(margin, y - lineHeight - 2, contentWidth, lineHeight + 6, rgb(0.2, 0.4, 0.6));
+      drawText(sanitizeForPdf(repo.repository || 'Unknown Repository'), margin + cellPadding, y - textSize, subHeaderSize, true, rgb(1, 1, 1));
+      y -= lineHeight + 10;
+
+      // Commit count
+      const commitCount = repo.count || (repo.commits ? repo.commits.length : 0);
+      drawText(`Anzahl Commits: ${commitCount}`, margin, y - textSize, textSize, false, rgb(0.4, 0.4, 0.4));
+      y -= lineHeight + 5;
+
+      // Commits table header
+      const cols = [
+        { label: 'SHA', width: 60 },
+        { label: 'Nachricht', width: 200 },
+        { label: 'Autor', width: 100 },
+        { label: 'Datum', width: contentWidth - 360 }
+      ];
+
+      checkNewPage(lineHeight * 2);
+      drawRect(margin, y - lineHeight + 2, contentWidth, lineHeight, rgb(0.9, 0.93, 0.98));
+
+      let colX = margin;
+      for (const col of cols) {
+        drawText(col.label, colX + cellPadding, y - textSize, textSize, true);
+        colX += col.width;
       }
-    }
-  }
-
-  // Render summary section (scalar values)
-  if (scalarKeys.length > 0) {
-    checkNewPage(headerSize + lineHeight * (scalarKeys.length + 2));
-
-    // Header
-    drawText('Zusammenfassung', margin, y, headerSize, true);
-    y -= headerSize + 10;
-
-    // Draw summary table
-    const labelWidth = 180;
-    const valueWidth = contentWidth - labelWidth;
-
-    for (const key of scalarKeys) {
-      checkNewPage(lineHeight + 5);
-
-      const val = data[key];
-      const label = formatLabelForPdf(key);
-      const valueStr = formatValueForPdf(val);
-
-      // Background for alternating rows
-      if (scalarKeys.indexOf(key) % 2 === 0) {
-        drawRect(margin, y - lineHeight + 3, contentWidth, lineHeight, rgb(0.96, 0.96, 0.96));
-      }
-
-      // Label (bold)
-      drawText(label, margin + cellPadding, y - textSize, textSize, true);
-
-      // Value
-      drawText(valueStr, margin + labelWidth + cellPadding, y - textSize, textSize);
-
-      // Border
-      drawLine(margin, y - lineHeight + 3, margin + contentWidth, y - lineHeight + 3);
-
+      drawLine(margin, y - lineHeight + 2, margin + contentWidth, y - lineHeight + 2);
       y -= lineHeight;
+
+      // Commit rows
+      const commits = repo.commits || [];
+      for (let i = 0; i < commits.length; i++) {
+        checkNewPage(lineHeight + 5);
+        const commit = commits[i];
+
+        // Alternating background
+        if (i % 2 === 0) {
+          drawRect(margin, y - lineHeight + 2, contentWidth, lineHeight, rgb(0.97, 0.97, 0.97));
+        }
+
+        colX = margin;
+
+        // SHA (short)
+        const sha = commit.shortSha || commit.sha || '-';
+        drawText(sha.substring(0, 7), colX + cellPadding, y - textSize, smallSize, false, rgb(0.3, 0.3, 0.7));
+        colX += cols[0].width;
+
+        // Message (truncated)
+        const msg = commit.message || '-';
+        const maxMsgLen = 40;
+        const displayMsg = msg.length > maxMsgLen ? msg.substring(0, maxMsgLen - 2) + '..' : msg;
+        drawText(displayMsg.replace(/\n/g, ' '), colX + cellPadding, y - textSize, smallSize);
+        colX += cols[1].width;
+
+        // Author (extract name from object)
+        let authorName = '-';
+        if (commit.author) {
+          if (typeof commit.author === 'string') {
+            authorName = commit.author;
+          } else if (commit.author.name) {
+            authorName = commit.author.name;
+          }
+        }
+        const maxAuthorLen = 18;
+        const displayAuthor = authorName.length > maxAuthorLen ? authorName.substring(0, maxAuthorLen - 2) + '..' : authorName;
+        drawText(displayAuthor, colX + cellPadding, y - textSize, smallSize);
+        colX += cols[2].width;
+
+        // Date (extract from author object or commit)
+        let dateStr = '-';
+        if (commit.author && commit.author.date) {
+          dateStr = formatDateTime(commit.author.date);
+        } else if (commit.date) {
+          dateStr = formatDateTime(commit.date);
+        }
+        drawText(dateStr, colX + cellPadding, y - textSize, smallSize);
+
+        // Row border
+        drawLine(margin, y - lineHeight + 2, margin + contentWidth, y - lineHeight + 2);
+        y -= lineHeight;
+      }
+
+      // Table borders
+      drawLine(margin, y + (commits.length + 1) * lineHeight + 2, margin, y + 2);
+      drawLine(margin + contentWidth, y + (commits.length + 1) * lineHeight + 2, margin + contentWidth, y + 2);
+
+      y -= 25; // Space between repos
     }
+  } else {
+    // Generic structured data rendering
+    const scalarKeys: string[] = [];
+    const arrayKeys: string[] = [];
+    const objectKeys: string[] = [];
 
-    y -= 20; // Space after summary
-  }
-
-  // Render arrays as tables
-  for (const key of arrayKeys) {
-    const arr = key === '_root' ? data : data[key];
-    if (!Array.isArray(arr) || arr.length === 0) continue;
-
-    // Get column keys from first object
-    const colKeys: string[] = [];
-    if (typeof arr[0] === 'object' && arr[0] !== null) {
-      for (const item of arr) {
-        for (const k of Object.keys(item)) {
-          if (!colKeys.includes(k)) colKeys.push(k);
+    if (Array.isArray(data)) {
+      arrayKeys.push('_root');
+    } else {
+      for (const key of Object.keys(data)) {
+        const val = data[key];
+        if (Array.isArray(val)) {
+          arrayKeys.push(key);
+        } else if (val && typeof val === 'object') {
+          objectKeys.push(key);
+        } else {
+          scalarKeys.push(key);
         }
       }
     }
 
-    if (colKeys.length === 0) continue;
+    // Title
+    const genericTitle = options.pdfTitle || 'Datenreport';
+    drawText(genericTitle, margin, y, titleSize, true);
+    y -= titleSize + 15;
 
-    checkNewPage(headerSize + lineHeight * 3);
+    // Render scalar values
+    if (scalarKeys.length > 0) {
+      drawText('Zusammenfassung', margin, y, headerSize, true, rgb(0.2, 0.4, 0.6));
+      y -= headerSize + 8;
 
-    // Section header
-    if (key !== '_root') {
-      drawText(formatLabelForPdf(key), margin, y, headerSize, true);
-      y -= headerSize + 10;
+      const labelWidth = 160;
+      for (const key of scalarKeys) {
+        checkNewPage(lineHeight + 5);
+        const val = data[key];
+        const label = formatLabelForPdf(key);
+        const valueStr = formatValueForPdf(val);
+
+        if (scalarKeys.indexOf(key) % 2 === 0) {
+          drawRect(margin, y - lineHeight + 2, contentWidth, lineHeight, rgb(0.96, 0.96, 0.96));
+        }
+
+        drawText(label, margin + cellPadding, y - textSize, textSize, true);
+
+        // Truncate long values
+        const maxValLen = 60;
+        const displayVal = valueStr.length > maxValLen ? valueStr.substring(0, maxValLen - 2) + '..' : valueStr;
+        drawText(displayVal, margin + labelWidth, y - textSize, textSize);
+
+        drawLine(margin, y - lineHeight + 2, margin + contentWidth, y - lineHeight + 2);
+        y -= lineHeight;
+      }
+      y -= 15;
     }
 
-    // Calculate column widths
-    const numCols = colKeys.length;
-    const colWidth = contentWidth / numCols;
+    // Render nested objects
+    for (const key of objectKeys) {
+      checkNewPage(50);
+      const obj = data[key];
 
-    // Draw table header
-    drawRect(margin, y - lineHeight + 3, contentWidth, lineHeight, rgb(0.9, 0.93, 0.98));
+      drawText(formatLabelForPdf(key), margin, y, subHeaderSize, true, rgb(0.3, 0.5, 0.3));
+      y -= subHeaderSize + 6;
 
-    for (let i = 0; i < colKeys.length; i++) {
-      const x = margin + i * colWidth;
-      const label = formatLabelForPdf(colKeys[i]);
-      // Truncate if too long
-      const maxChars = Math.floor(colWidth / 6);
-      const displayLabel = label.length > maxChars ? label.substring(0, maxChars - 2) + '..' : label;
-      drawText(displayLabel, x + cellPadding, y - textSize, textSize, true);
+      const labelWidth = 140;
+      for (const subKey of Object.keys(obj)) {
+        checkNewPage(lineHeight + 5);
+        const subVal = obj[subKey];
 
-      // Vertical line
-      if (i > 0) {
-        drawLine(x, y + 3, x, y - lineHeight + 3);
+        // Skip nested objects/arrays in sub-objects
+        if (typeof subVal === 'object' && subVal !== null) continue;
+
+        drawText(formatLabelForPdf(subKey), margin + 10 + cellPadding, y - textSize, smallSize, true);
+        drawText(formatValueForPdf(subVal), margin + 10 + labelWidth, y - textSize, smallSize);
+        y -= lineHeight - 2;
       }
+      y -= 10;
     }
 
-    // Header bottom border
-    drawLine(margin, y - lineHeight + 3, margin + contentWidth, y - lineHeight + 3);
-    y -= lineHeight;
+    // Render arrays as tables
+    for (const key of arrayKeys) {
+      const arr = key === '_root' ? data : data[key];
+      if (!Array.isArray(arr) || arr.length === 0) continue;
 
-    // Draw data rows
-    for (let rowIdx = 0; rowIdx < arr.length; rowIdx++) {
-      checkNewPage(lineHeight + 5);
+      checkNewPage(60);
 
-      const row = arr[rowIdx];
-
-      // Alternating row background
-      if (rowIdx % 2 === 1) {
-        drawRect(margin, y - lineHeight + 3, contentWidth, lineHeight, rgb(0.98, 0.98, 0.98));
+      if (key !== '_root') {
+        drawText(formatLabelForPdf(key), margin, y, subHeaderSize, true, rgb(0.2, 0.4, 0.6));
+        y -= subHeaderSize + 8;
       }
 
+      // Get simple (non-object) column keys
+      const colKeys: string[] = [];
+      if (typeof arr[0] === 'object' && arr[0] !== null) {
+        for (const k of Object.keys(arr[0])) {
+          const sample = arr[0][k];
+          // Only include simple values, not nested objects/arrays
+          if (typeof sample !== 'object' || sample === null) {
+            colKeys.push(k);
+          }
+        }
+      }
+
+      if (colKeys.length === 0) {
+        // Fallback: show as text
+        for (const item of arr) {
+          checkNewPage(lineHeight);
+          drawText('- ' + formatValueForPdf(item), margin, y - textSize, textSize);
+          y -= lineHeight;
+        }
+        continue;
+      }
+
+      // Calculate column widths
+      const colWidth = contentWidth / colKeys.length;
+
+      // Header
+      drawRect(margin, y - lineHeight + 2, contentWidth, lineHeight, rgb(0.9, 0.93, 0.98));
       for (let i = 0; i < colKeys.length; i++) {
         const x = margin + i * colWidth;
-        const val = row[colKeys[i]];
-        const valueStr = formatValueForPdf(val);
-        // Truncate if too long
-        const maxChars = Math.floor(colWidth / 5.5);
-        const displayVal = valueStr.length > maxChars ? valueStr.substring(0, maxChars - 2) + '..' : valueStr;
-        drawText(displayVal, x + cellPadding, y - textSize, textSize);
+        const label = formatLabelForPdf(colKeys[i]);
+        const maxChars = Math.floor(colWidth / 5);
+        const displayLabel = label.length > maxChars ? label.substring(0, maxChars - 2) + '..' : label;
+        drawText(displayLabel, x + cellPadding, y - textSize, smallSize, true);
+      }
+      drawLine(margin, y - lineHeight + 2, margin + contentWidth, y - lineHeight + 2);
+      y -= lineHeight;
 
-        // Vertical line
-        if (i > 0) {
-          drawLine(x, y + 3, x, y - lineHeight + 3);
+      // Data rows
+      for (let rowIdx = 0; rowIdx < arr.length; rowIdx++) {
+        checkNewPage(lineHeight + 5);
+        const row = arr[rowIdx];
+
+        if (rowIdx % 2 === 0) {
+          drawRect(margin, y - lineHeight + 2, contentWidth, lineHeight, rgb(0.97, 0.97, 0.97));
         }
+
+        for (let i = 0; i < colKeys.length; i++) {
+          const x = margin + i * colWidth;
+          const val = row[colKeys[i]];
+          const valueStr = formatValueForPdf(val);
+          const maxChars = Math.floor(colWidth / 4.5);
+          const displayVal = valueStr.length > maxChars ? valueStr.substring(0, maxChars - 2) + '..' : valueStr;
+          drawText(displayVal, x + cellPadding, y - textSize, smallSize);
+        }
+
+        drawLine(margin, y - lineHeight + 2, margin + contentWidth, y - lineHeight + 2);
+        y -= lineHeight;
       }
 
-      // Row bottom border
-      drawLine(margin, y - lineHeight + 3, margin + contentWidth, y - lineHeight + 3);
-      y -= lineHeight;
+      y -= 20;
     }
-
-    // Table outer border
-    const tableHeight = (arr.length + 1) * lineHeight;
-    drawLine(margin, y + tableHeight + 3, margin, y + 3); // Left
-    drawLine(margin + contentWidth, y + tableHeight + 3, margin + contentWidth, y + 3); // Right
-    drawLine(margin, y + tableHeight + 3, margin + contentWidth, y + tableHeight + 3); // Top
-
-    y -= 25; // Space after table
   }
 
   const bytes = await pdfDoc.save();
